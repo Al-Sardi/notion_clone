@@ -1,35 +1,108 @@
 import { supabase } from "./index";
 import { Database } from "./types";
 import { v4 as uuidv4 } from "uuid";
-import { PostgrestError, RealtimePostgresChangesPayload } from "@supabase/supabase-js";
+import { PostgrestError, RealtimePostgresChangesPayload, RealtimePostgresChangesFilter, RealtimeChannel, AuthError } from "@supabase/supabase-js";
+
+if (!supabase) {
+  const error = new Error("Supabase client is not initialized");
+  console.error("Supabase client initialization error:", error);
+  throw error;
+}
+
+// Helper function to log errors consistently
+const logError = (context: string, error: unknown, extra: Record<string, any> = {}) => {
+  const errorObj = error as Error | PostgrestError | AuthError;
+  const errorDetails = {
+    context,
+    error: {
+      name: errorObj?.name,
+      message: errorObj?.message,
+      ...(errorObj as any).code && { code: (errorObj as any).code },
+      ...(errorObj as any).status && { status: (errorObj as any).status },
+    },
+    ...extra,
+  };
+  
+  console.error(`[${new Date().toISOString()}] Error in ${context}:`, errorDetails);
+  return errorDetails;
+};
 
 export type Document = Database["public"]["Tables"]["documents"]["Row"];
 export type DocumentUpdate = Database["public"]["Tables"]["documents"]["Update"];
 export type DocumentInsert = Database["public"]["Tables"]["documents"]["Insert"];
 
 const handleSupabaseError = (error: unknown, operation: string) => {
-  if (error instanceof Error) {
-    const errorDetails = {
-      ...(error as PostgrestError),
-      errorMessage: error.message,
-      errorName: error.name,
-      errorStack: error.stack,
-    };
-    console.error(`Error in ${operation}:`, errorDetails);
-    throw error;
-  } else {
-    console.error(`Unknown error in ${operation}:`, error);
-    throw new Error(`Unknown error in ${operation}`);
-  }
+  const errorDetails = logError(operation, error);
+  throw new Error(`Supabase error in ${operation}: ${JSON.stringify(errorDetails, null, 2)}`);
 };
 
-export const getDocuments = async (userId: string): Promise<Document[]> => {
-  try {
-    if (!userId) {
-      console.warn("No user ID provided to getDocuments");
-      return [];
-    }
+// Common configuration for document queries
+const documentQueryOptions = {
+  count: 'exact' as const,
+  head: false,
+  // Disable realtime for all document queries
+} as const;
 
+interface DocumentQueryResult {
+  data: Document[] | null;
+  error: Error | null;
+}
+
+/**
+ * Fetches documents for a specific user
+ * @param userId - The ID of the user to fetch documents for
+ * @returns Promise<Document[]> - Array of documents or empty array on error
+ */
+export const getDocuments = async (userId: string): Promise<Document[]> => {
+  const context = 'getDocuments';
+  const timestamp = new Date().toISOString();
+  
+  const log = (message: string, data?: any) => {
+    console.log(`[${timestamp}] ${context}: ${message}`, data || '');
+  };
+  
+  const logError = (message: string, error?: any) => {
+    console.error(`[${timestamp}] ${context}: ${message}`, {
+      error: error?.message || error || 'No error details',
+      name: error?.name,
+      code: error?.code,
+      status: error?.status,
+      userId,
+      timestamp
+    });
+  };
+
+  // Validate input
+  if (!userId) {
+    const error = new Error('No user ID provided');
+    logError('Validation failed', error);
+    return [];
+  }
+
+  log(`Fetching documents for user: ${userId}`);
+  
+  try {
+    // First, try to get the current session
+    const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+    
+    // If we can't get the session, try to recover by refreshing it
+    if (sessionError || !session) {
+      log('No active session found, attempting to recover...', { error: sessionError });
+      
+      // Try to refresh the session
+      const { data: refreshedSession, error: refreshError } = await supabase.auth.refreshSession();
+      
+      if (refreshError || !refreshedSession.session) {
+        logError('Failed to refresh session', refreshError);
+        return [];
+      }
+      
+      log('Successfully refreshed session');
+    } else {
+      log(`Active session found, user ID: ${session.user?.id}`);
+    }
+    
+    // Fetch documents
     const { data, error } = await supabase
       .from("documents")
       .select("*")
@@ -38,18 +111,20 @@ export const getDocuments = async (userId: string): Promise<Document[]> => {
       .order("created_at", { ascending: false });
 
     if (error) {
-      console.error("Supabase error in getDocuments:", {
-        message: error.message,
-        code: error.code,
-        details: error.details,
-        hint: error.hint
-      });
+      logError('Database query failed', error);
       return [];
     }
 
-    return Array.isArray(data) ? data : [];
+    if (!data || !Array.isArray(data)) {
+      log('No documents found');
+      return [];
+    }
+
+    log(`Successfully fetched ${data.length} documents`);
+    return data;
+    
   } catch (error) {
-    console.error("Unexpected error in getDocuments:", error);
+    logError('Unexpected error', error);
     return [];
   }
 };
@@ -59,39 +134,110 @@ export const createDocument = async (
   title: string = "Untitled", 
   parentId: string | null = null
 ): Promise<Document | null> => {
+  const context = 'createDocument';
+  const timestamp = new Date().toISOString();
+  
+  const log = (message: string, data?: any) => {
+    console.log(`[${timestamp}] ${context}: ${message}`, data || '');
+  };
+  
   try {
-    if (!userId) throw new Error("User ID is required");
+    log('Starting document creation', { userId, title, parentId });
+    
+    if (!userId) {
+      const error = new Error('No user ID provided');
+      logError(context, error);
+      throw error;
+    }
 
-    const document: DocumentInsert = {
-      id: uuidv4(),
-      title,
+    // Verify we have a valid session
+    const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+    if (sessionError || !session) {
+      log('No active session, attempting to refresh...');
+      const { data: refreshedSession, error: refreshError } = await supabase.auth.refreshSession();
+      
+      if (refreshError || !refreshedSession?.session) {
+        log('No active session found, checking authentication state...');
+        // Check if we have a user ID but no session - this might be a race condition
+        const { data: { user } } = await supabase.auth.getUser();
+        
+        if (!user) {
+          const error = new Error('No authenticated user found');
+          logError(context, error, { sessionError, refreshError });
+          throw error;
+        }
+        
+        log('Found user but no active session, continuing with user ID', { userId });
+      } else {
+        log('Successfully refreshed session');
+      }
+    }
+    
+    const documentId = uuidv4();
+    const newDocument: DocumentInsert = {
+      id: documentId,
       user_id: userId,
+      title,
       parent_id: parentId,
+      content: JSON.stringify([{ type: 'paragraph', children: [{ text: '' }] }]), // Default empty content
+      cover_image: null,
+      icon: '📄',
       is_archived: false,
       is_published: false,
-      content: null,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
     };
 
-    const { data, error, status, statusText } = await supabase
+    log('Inserting new document', { documentId, userId });
+    
+    // First insert the document
+    const { data, error } = await supabase
       .from("documents")
-      .insert(document)
+      .insert([newDocument])
       .select()
       .single();
 
     if (error) {
-      console.error("Failed to create document:", {
-        error,
-        status,
-        statusText,
-        document
+      logError('Failed to insert document', error, { 
+        userId, 
+        documentId,
+        parentId,
+        errorCode: error.code,
+        errorMessage: error.message
       });
-      throw error;
+      
+      // If it's an auth error, try to refresh the session
+      if (error.code === 'PGRST301' || error.code === 'PGRST116') {
+        log('Session might be expired, attempting to refresh...');
+        const { error: refreshError } = await supabase.auth.refreshSession();
+        if (!refreshError) {
+          // Retry the insert after refresh
+          const retryResult = await supabase
+            .from("documents")
+            .insert([newDocument])
+            .select()
+            .single();
+            
+          if (!retryResult.error) {
+            log('Successfully created document after session refresh', { documentId });
+            return retryResult.data as Document;
+          }
+        }
+      }
+      
+      throw new Error(`Failed to create document: ${error.message}`);
     }
 
-    return data;
+    log('Successfully created document', { documentId });
+    return data as Document;
+    
   } catch (error) {
-    handleSupabaseError(error, "createDocument");
-    return null;
+    logError(context, error, { 
+      userId, 
+      parentId,
+      timestamp
+    });
+    throw error; // Re-throw to allow toast to handle the error message
   }
 };
 
@@ -99,17 +245,15 @@ export const getDocumentById = async (documentId: string): Promise<Document | nu
   try {
     if (!documentId) throw new Error("Document ID is required");
 
-    const { data, error, status, statusText } = await supabase
+    const { data, error } = await supabase
       .from("documents")
-      .select()
+      .select("*", documentQueryOptions)
       .eq("id", documentId)
       .single();
 
     if (error) {
       console.error("Failed to get document by ID:", {
         error,
-        status,
-        statusText,
         documentId
       });
       throw error;
@@ -122,11 +266,14 @@ export const getDocumentById = async (documentId: string): Promise<Document | nu
   }
 };
 
-export const updateDocument = async (documentId: string, update: DocumentUpdate): Promise<Document | null> => {
+export const updateDocument = async <T extends DocumentUpdate>(
+  documentId: string,
+  update: T
+): Promise<Document | null> => {
   try {
     if (!documentId) throw new Error("Document ID is required");
 
-    const { data, error, status, statusText } = await supabase
+    const { data, error } = await supabase
       .from("documents")
       .update({
         ...update,
@@ -139,8 +286,6 @@ export const updateDocument = async (documentId: string, update: DocumentUpdate)
     if (error) {
       console.error("Failed to update document:", {
         error,
-        status,
-        statusText,
         documentId,
         update
       });
@@ -166,7 +311,7 @@ export const removeDocument = async (documentId: string): Promise<boolean> => {
   try {
     if (!documentId) throw new Error("Document ID is required");
 
-    const { error, status, statusText } = await supabase
+    const { error } = await supabase
       .from("documents")
       .delete()
       .eq("id", documentId);
@@ -174,8 +319,6 @@ export const removeDocument = async (documentId: string): Promise<boolean> => {
     if (error) {
       console.error("Failed to remove document:", {
         error,
-        status,
-        statusText,
         documentId
       });
       throw error;
@@ -192,19 +335,17 @@ export const getArchivedDocuments = async (userId: string): Promise<Document[]> 
   try {
     if (!userId) throw new Error("User ID is required");
 
-    const { data, error, status, statusText } = await supabase
+    const { data, error } = await supabase
       .from("documents")
-      .select()
+      .select("*", documentQueryOptions)
       .eq("user_id", userId)
       .eq("is_archived", true)
       .order("updated_at", { ascending: false });
 
     if (error) {
-      console.error("Failed to get archived documents:", {
+      console.error("Failed to fetch archived documents:", {
         error,
-        status,
-        statusText,
-        userId
+        userId,
       });
       throw error;
     }
@@ -219,27 +360,33 @@ export const getArchivedDocuments = async (userId: string): Promise<Document[]> 
 export const subscribeToUserDocuments = (
   userId: string,
   callback: (payload: RealtimePostgresChangesPayload<Document>) => void
-) => {
+): RealtimeChannel => {
   if (!userId) throw new Error("User ID is required");
 
   console.log("Setting up real-time subscription for user:", userId);
 
-  return supabase
-    .channel(`user-documents-${userId}`)
-    .on(
-      "postgres_changes",
+  const channel = supabase.channel(`user-documents-${userId}`);
+  
+  const subscription = channel
+    .on('postgres_changes', 
       {
-        event: "*",
-        schema: "public",
-        table: "documents",
+        event: '*',
+        schema: 'public',
+        table: 'documents',
         filter: `user_id=eq.${userId}`,
-      },
-      (payload) => {
+      } as const,
+      (payload: RealtimePostgresChangesPayload<Document>) => {
         console.log("Real-time update received:", payload);
-        callback(payload as RealtimePostgresChangesPayload<Document>);
+        callback(payload);
       }
     )
-    .subscribe((status) => {
-      console.log("Subscription status:", status);
+    .subscribe((status: 'SUBSCRIBED' | 'CHANNEL_ERROR' | 'TIMED_OUT' | 'CLOSED', err?: Error) => {
+      if (err) {
+        console.error("Subscription error:", err);
+      } else {
+        console.log("Subscription status:", status);
+      }
     });
+
+  return channel as RealtimeChannel;
 }; 

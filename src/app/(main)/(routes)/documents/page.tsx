@@ -6,44 +6,93 @@ import { Button } from "@/components/ui/button";
 import { PlusCircle } from "lucide-react";
 import { toast } from "sonner";
 import { useState, useEffect } from "react";
-import { createDocument, getDocuments } from "@/lib/supabase/documents";
+import { createDocument, getDocuments, type Document } from "@/lib/supabase/documents";
 import { DocumentList } from "@/components/document-list";
 
 const DocumentsPage = () => {
   const { user } = useUser();
   const [isLoading, setIsLoading] = useState(false);
-  const [hasDocuments, setHasDocuments] = useState(false);
+  const [documents, setDocuments] = useState<Document[]>([]);
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 
+  // Load documents when user is available
   useEffect(() => {
-    const checkDocuments = async () => {
+    const loadDocuments = async () => {
       if (!user?.id) return;
+      
+      setIsLoading(true);
       try {
         const docs = await getDocuments(user.id);
-        setHasDocuments(docs && docs.length > 0);
+        setDocuments(docs);
       } catch (error) {
-        console.error("Failed to check documents:", error);
+        console.error("Failed to load documents:", error);
+        toast.error("Failed to load documents");
+      } finally {
+        setIsLoading(false);
       }
     };
 
-    checkDocuments();
+    loadDocuments();
   }, [user?.id]);
+  
+  const hasDocuments = documents.length > 0;
 
   const onCreate = async () => {
-    if (!user?.id) return;
+    console.log("Create button clicked");
+    
+    if (!user?.id) {
+      console.error("No user ID available");
+      toast.error("Please sign in to create a note");
+      return;
+    }
     
     setIsLoading(true);
+    const loadingToast = toast.loading("Creating a new note...");
+    
     try {
-      await toast.promise(
-        createDocument(user.id, "Untitled"),
-        {
-          loading: "Creating a new note...",
-          success: "New note created!",
-          error: "Failed to create a new note."
-        }
-      );
-      setHasDocuments(true);
+      console.log("Creating document for user:", user.id);
+      const newDocument = await createDocument(user.id, "Untitled");
+      
+      if (!newDocument) {
+        throw new Error("Failed to create document - no document returned");
+      }
+      
+      console.log("Document created successfully:", newDocument.id);
+      
+      // Update the documents list
+      setDocuments(currentDocs => [newDocument, ...currentDocs]);
+      
+      // Update the toast to show success
+      toast.dismiss(loadingToast);
+      toast.success("New note created!");
+      
+      // Optionally navigate to the new document
+      // router.push(`/documents/${newDocument.id}`);
+      
     } catch (error) {
-      console.error("Failed to create document:", error);
+      console.error("Error in onCreate:", error);
+      
+      let errorMessage = "Failed to create note";
+      if (error instanceof Error) {
+        errorMessage = error.message;
+        // Clean up error messages for better UX
+        if (errorMessage.includes('JWT')) {
+          errorMessage = "Session expired. Please refresh the page and try again.";
+        } else if (errorMessage.includes('permission')) {
+          errorMessage = "You don't have permission to create notes.";
+        }
+      }
+      
+      toast.dismiss(loadingToast);
+      toast.error(errorMessage);
+      
+      // If it's an auth-related error, suggest a refresh
+      if (errorMessage.toLowerCase().includes('auth') || 
+          errorMessage.toLowerCase().includes('session') ||
+          errorMessage.toLowerCase().includes('jwt')) {
+        toast.info("Refreshing page to restore session...");
+        setTimeout(() => window.location.reload(), 1500);
+      }
     } finally {
       setIsLoading(false);
     }
@@ -84,7 +133,14 @@ const DocumentsPage = () => {
               {isLoading ? "Creating..." : "New note"}
             </Button>
           </div>
-          <DocumentList />
+          <DocumentList 
+            documents={documents}
+            expanded={expanded}
+            onExpand={(id) => setExpanded(prev => ({
+              ...prev,
+              [id]: !prev[id]
+            }))}
+          />
         </div>
       )}
     </div>

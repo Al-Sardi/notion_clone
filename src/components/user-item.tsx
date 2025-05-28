@@ -22,31 +22,40 @@ const UserItemContent = memo(function UserItemContent({
   email?: string;
 }) {
   return (
-    <>
-      <div className="flex flex-col space-y-4 p-2">
-        <p className="text-xs font-medium leading-none text-muted-foreground">
+    <div className="w-full">
+      <div className="flex flex-col space-y-4 p-4">
+        <p className="text-xs font-medium text-muted-foreground px-2">
           {email}
         </p>
-        <div className="flex items-center gap-x-2">
+        <div className="flex items-center gap-x-3 px-2">
           <div className="rounded-md bg-secondary p-1 dark:bg-neutral-800">
-            <Avatar className="h-8 w-8">
+            <Avatar className="h-10 w-10">
               <AvatarImage src={imageUrl} />
             </Avatar>
           </div>
-          <div className="space-y-1">
-            <p className="text-sm line-clamp-1 text-foreground">
+          <div className="space-y-1 overflow-hidden">
+            <p className="text-sm font-medium text-foreground truncate">
               {fullName}&apos;s Notion
+            </p>
+            <p className="text-xs text-muted-foreground">
+              View account
             </p>
           </div>
         </div>
       </div>
-      <DropdownMenuSeparator />
-      <DropdownMenuItem asChild className="w-full cursor-pointer text-muted-foreground hover:text-foreground">
-        <SignOutButton>
-          Log out
-        </SignOutButton>
-      </DropdownMenuItem>
-    </>
+      <div className="w-full border-t border-gray-200 dark:border-gray-800 my-2"></div>
+      <div className="p-2">
+        <DropdownMenuItem asChild className="w-full p-0">
+          <div className="w-full">
+            <SignOutButton>
+              <button className="w-full text-left cursor-pointer rounded-md p-2 text-muted-foreground hover:bg-gray-200 dark:hover:bg-neutral-700 hover:text-foreground">
+                Log out
+              </button>
+            </SignOutButton>
+          </div>
+        </DropdownMenuItem>
+      </div>
+    </div>
   );
 });
 
@@ -75,12 +84,16 @@ export const UserItem = () => {
         </div>
       </DropdownMenuTrigger>
       <DropdownMenuContent
-        className="w-80"
+        className="w-full rounded-none border-0 shadow-none bg-transparent"
         align="start"
-        alignOffset={11}
+        side="right"
+        sideOffset={0}
+        alignOffset={0}
         forceMount
       >
-        <UserItemContent {...userInfo} />
+        <div className="bg-gray-100 dark:bg-[#171717] border-t border-gray-200 dark:border-gray-800">
+          <UserItemContent {...userInfo} />
+        </div>
       </DropdownMenuContent>
     </DropdownMenu>
   );

@@ -3,7 +3,6 @@
 import { useEffect, useState, useMemo } from "react";
 import { useUser } from "@clerk/nextjs";
 import { getDocuments, subscribeToUserDocuments, type Document } from "@/lib/supabase/documents";
-import { SearchInput } from "./search-input";
 import { Item } from "./item";
 import { FileIcon } from "lucide-react";
 import { useParams, useRouter } from "next/navigation";
@@ -25,7 +24,6 @@ export const DocumentList = ({
 }: DocumentListProps) => {
   const { user, isLoaded: isUserLoaded } = useUser();
   const [isLoading, setIsLoading] = useState(level === 0);
-  const [search, setSearch] = useState("");
   const [documents, setDocuments] = useState<Document[]>(initialDocuments);
   const params = useParams();
   const router = useRouter();
@@ -80,15 +78,8 @@ export const DocumentList = ({
   }, [user?.id, level]);
 
   const filteredDocuments = useMemo(() => {
-    const docs = documents.filter(doc => doc.parent_id === parentDocumentId);
-    
-    if (!search.trim()) return docs;
-    
-    const searchTerm = search.toLowerCase();
-    return docs.filter((doc) => 
-      doc.title.toLowerCase().includes(searchTerm)
-    );
-  }, [documents, search, parentDocumentId]);
+    return documents.filter(doc => doc.parent_id === parentDocumentId);
+  }, [documents, parentDocumentId]);
 
   const onRedirect = (documentId: string) => {
     router.push(`/documents/${documentId}`);
@@ -104,17 +95,10 @@ export const DocumentList = ({
 
   return (
     <div className="space-y-4">
-      {level === 0 && (
-        <SearchInput
-          value={search}
-          onChange={setSearch}
-          placeholder="Search by title..."
-        />
-      )}
       {filteredDocuments.length === 0 && level === 0 && (
         <div className="flex-1 flex flex-col items-center justify-center py-4">
           <p className="text-sm text-muted-foreground text-center mb-4">
-            {search ? "No documents found" : "No documents created yet"}
+            No documents created yet
           </p>
         </div>
       )}
